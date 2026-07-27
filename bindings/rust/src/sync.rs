@@ -1019,7 +1019,10 @@ mod tests {
         user_url: String,
         db_url: String,
         host: String,
+        db_prefix: String,
         server: Option<Child>,
+        // Keeps the directory alive while the spawned server may still write to it.
+        _sync_dir: Option<TempDir>,
         client: Client,
     }
 
@@ -1059,12 +1062,25 @@ mod tests {
                     user_url: USER_URL.to_string(),
                     db_url: format!("{}://{}--{}--{}.{}", tokens[0], name, name, name, tokens[1]),
                     host: format!("{name}--{name}--{name}.localhost"),
+                    db_prefix: String::new(),
                     server: None,
+                    _sync_dir: None,
                     client,
                 })
             } else {
                 let port: u16 = rand::rng().random_range(10_000..=65_535);
                 let server_bin = env::var("LOCAL_SYNC_SERVER").unwrap();
+
+                let sync_dir = env::var("LOCAL_SYNC_SERVER_DIR")
+                    .is_ok()
+                    .then(|| TempDir::new().context("failed to create --sync-dir tempdir"))
+                    .transpose()?;
+
+                let mut args = vec!["--sync-server".to_string(), format!("0.0.0.0:{port}")];
+                if let Some(dir) = &sync_dir {
+                    args.push("--sync-dir".to_string());
+                    args.push(dir.path().to_string_lossy().into_owned());
+                }
 
                 // IMPORTANT: do not use Stdio::piped() here. Nothing reads from
                 // those pipes, so once the kernel pipe buffer (~64 KiB on Linux)
@@ -1072,7 +1088,7 @@ mod tests {
                 // servicing HTTP requests, deadlocking sync operations in
                 // long-running tests like test_sync_parallel_writes_with_sync_ops.
                 let child = Command::new(server_bin)
-                    .args(["--sync-server", &format!("0.0.0.0:{port}")])
+                    .args(&args)
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
                     .spawn()
@@ -1088,11 +1104,19 @@ mod tests {
                     sleep(Duration::from_millis(100));
                 }
 
+                let db_prefix = if sync_dir.is_some() {
+                    format!("/db/{}", random_str())
+                } else {
+                    String::new()
+                };
+
                 Ok(Self {
                     user_url: user_url.clone(),
-                    db_url: user_url,
+                    db_url: format!("{user_url}{db_prefix}"),
                     host: String::new(),
+                    db_prefix,
                     server: Some(child),
+                    _sync_dir: sync_dir,
                     client,
                 })
             }
@@ -1105,7 +1129,7 @@ mod tests {
         pub async fn db_sql(&self, sql: &str) -> Result<Vec<Vec<Value>>> {
             let resp = self
                 .client
-                .post(format!("{}/v2/pipeline", self.user_url))
+                .post(format!("{}{}/v2/pipeline", self.user_url, self.db_prefix))
                 .header("Host", &self.host)
                 .json(&json!({
                     "requests": [{
