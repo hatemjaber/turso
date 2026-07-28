@@ -7,8 +7,8 @@ use crate::{
     config::Config,
     helper::LimboHelper,
     input::{
-        get_io, get_writer, ApplyWriter, DbLocation, NoopProgress, OutputMode, ProgressSink,
-        Settings, StderrProgress,
+        get_io, get_writer, open_flags, ApplyWriter, DbLocation, NoopProgress, OutputMode,
+        ProgressSink, Settings, StderrProgress,
     },
     manual,
     opcodes_dictionary::OPCODE_DESCRIPTIONS,
@@ -84,6 +84,13 @@ pub struct Opts {
         help = "Start sync server instead of interactive shell and listen at given address (e.g. 0.0.0.0:8080)"
     )]
     pub sync_server: Option<String>,
+    #[clap(
+        long,
+        requires = "sync_server",
+        conflicts_with = "database",
+        help = "Serve every database under PATH over the sync server, addressed as /db/{name}"
+    )]
+    pub sync_dir: Option<PathBuf>,
     #[clap(long, help = "Enable experimental encryption feature")]
     pub experimental_encryption: bool,
     #[clap(long, help = "Enable experimental index method feature")]
@@ -128,7 +135,7 @@ pub struct Limbo {
     pub interrupt_count: Arc<AtomicUsize>,
     input_buff: ManuallyDrop<String>,
     pub(crate) opts: Settings,
-    db_opts: turso_core::DatabaseOpts,
+    pub(crate) db_opts: turso_core::DatabaseOpts,
     read_state: ReadState,
     pub rl: Option<Editor<LimboHelper, DefaultHistory>>,
     config: Option<Config>,
@@ -259,11 +266,7 @@ impl Limbo {
         let (io, conn) = if db_file.starts_with("file:") {
             Connection::from_uri(&db_file, db_opts, Arc::new(SqliteDialect))?
         } else {
-            let flags = if opts.readonly {
-                OpenFlags::default().union(OpenFlags::ReadOnly)
-            } else {
-                OpenFlags::default()
-            };
+            let flags = open_flags(opts.readonly);
             let (io, db) = Database::open_new(
                 &db_file,
                 opts.vfs.as_ref(),
